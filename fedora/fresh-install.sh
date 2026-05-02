@@ -332,6 +332,76 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+section "Btrfs Snapshots & Rollback (snapper + grub-btrfs)"
+# ─────────────────────────────────────────────────────────────────────────────
+if ! findmnt -n -o FSTYPE / | grep -q btrfs; then
+  warn "Root filesystem is not Btrfs — skipping snapshot setup."
+else
+  log "Making GRUB menu always visible..."
+  grub2-editenv - unset menu_auto_hide
+
+  log "Installing snapper, btrfs-assistant, libdnf5-plugin-actions, inotify-tools..."
+  dnf install -y snapper libdnf5-plugin-actions btrfs-assistant inotify-tools git make
+
+  log "Creating snapper configurations for / and /home..."
+  snapper -c root create-config / || true
+  snapper -c home create-config /home || true
+
+  log "Restoring SELinux contexts on snapshot directories..."
+  restorecon -RFv /.snapshots
+  restorecon -RFv /home/.snapshots
+
+  log "Granting ${REAL_USER} access to snapper..."
+  snapper -c root set-config "ALLOW_USERS=${REAL_USER}" SYNC_ACL=yes
+  snapper -c home set-config "ALLOW_USERS=${REAL_USER}" SYNC_ACL=yes
+
+  log "Disabling timeline snapshots for /home (snapshots on DNF only)..."
+  snapper -c home set-config TIMELINE_CREATE=no
+
+  log "Preventing updatedb from indexing .snapshots..."
+  if ! grep -q '\.snapshots' /etc/updatedb.conf; then
+    echo 'PRUNENAMES = ".snapshots"' >> /etc/updatedb.conf
+  fi
+
+  log "Setting up DNF actions for automatic pre/post snapshots..."
+  mkdir -p /etc/dnf/libdnf5-plugins/actions.d
+  cat > /etc/dnf/libdnf5-plugins/actions.d/snapper.actions <<'EOF'
+# Capture the command that triggered the transaction
+pre_transaction::::/usr/bin/sh -c echo\ "tmp.cmd=$(ps\ -o\ command\ --no-headers\ -p\ '${pid}')"
+
+# Create a pre-snapshot and store its number
+pre_transaction::::/usr/bin/sh -c echo\ "tmp.snapper_pre_number=$(snapper\ create\ -t\ pre\ -c\ number\ -p\ -d\ '${tmp.cmd}')"
+
+# Create a post-snapshot paired with the pre-snapshot
+post_transaction::::/usr/bin/sh -c [\ -n\ "${tmp.snapper_pre_number}"\ ]\ &&\ snapper\ create\ -t\ post\ --pre-number\ "${tmp.snapper_pre_number}"\ -c\ number\ -d\ "${tmp.cmd}"\ ;\ echo\ tmp.snapper_pre_number\ ;\ echo\ tmp.cmd
+EOF
+
+  log "Installing grub-btrfs (boot into snapshots from GRUB)..."
+  GRUB_BTRFS_TMP=$(mktemp -d)
+  git clone https://github.com/Antynea/grub-btrfs "${GRUB_BTRFS_TMP}/grub-btrfs"
+  pushd "${GRUB_BTRFS_TMP}/grub-btrfs" > /dev/null
+
+  # Apply Fedora-specific settings to grub-btrfs config
+  sed -i \
+    -e '/^#GRUB_BTRFS_SNAPSHOT_KERNEL_PARAMETERS=/a GRUB_BTRFS_SNAPSHOT_KERNEL_PARAMETERS="rd.live.overlay.overlayfs=1"' \
+    -e '/^#GRUB_BTRFS_GRUB_DIRNAME=/a GRUB_BTRFS_GRUB_DIRNAME="/boot/grub2"' \
+    -e '/^#GRUB_BTRFS_MKCONFIG=/a GRUB_BTRFS_MKCONFIG=/usr/bin/grub2-mkconfig' \
+    -e '/^#GRUB_BTRFS_SCRIPT_CHECK=/a GRUB_BTRFS_SCRIPT_CHECK=grub2-script-check' \
+    config
+
+  make install
+  popd > /dev/null
+  rm -rf "${GRUB_BTRFS_TMP}"
+
+  log "Enabling snapper and grub-btrfs services..."
+  systemctl enable --now grub-btrfsd.service
+  systemctl enable --now snapper-timeline.timer
+  systemctl enable --now snapper-cleanup.timer
+
+  success "Btrfs snapshot support configured (snapper + grub-btrfs)."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 section "All Done!"
 # ─────────────────────────────────────────────────────────────────────────────
 echo -e "${GREEN}${BOLD}"
@@ -348,9 +418,11 @@ echo "  ✔  Discord"
 echo "  ✔  mise"
 echo "  ✔  fish  (default shell)"
 echo "  ✔  ghostty  (default KDE terminal)"
+echo "  ✔  Btrfs snapshots (snapper + grub-btrfs)"
 echo -e "${NC}"
 echo -e "${BOLD}Next steps:${NC}"
 echo "  • Log out and back in for the fish default shell to take effect."
 echo "  • Run 'mise doctor' inside a fish session to verify mise is set up correctly."
 echo "  • Run 'flatpak update' periodically to keep Flatpak apps current."
+echo "  • Use 'snapper ls' to list snapshots; 'btrfs-assistant' GUI for rollbacks."
 echo ""
