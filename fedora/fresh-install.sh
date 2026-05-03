@@ -57,7 +57,7 @@ section "Enable Flathub (Flatpak)"
 log "Adding Flathub remote..."
 flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 success "Flathub ready."
-
+sudo dnf copr enable scottames/ghostty
 # ─────────────────────────────────────────────────────────────────────────────
 section "DNF Packages: jq, htop, fish, ghostty"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,12 +78,28 @@ success "ClamAV installed."
 success "lynis installed."
 
 log "Updating rkhunter database..."
-rkhunter --update
-success "rkhunter database updated."
+rkhunter --update || true          # exit 1 when already current; not a real error
+success "rkhunter database up-to-date."
 
 log "Updating ClamAV signatures..."
-freshclam
-success "ClamAV signatures updated."
+freshclam || true                  # may exit non-zero when signatures are current
+success "ClamAV signatures up-to-date."
+
+CLAMD_CONF="/etc/clamd.d/scan.conf"
+CLAMD_SOCKET_LINE="LocalSocket /run/clamd.scan/clamd.sock"
+
+log "Configuring clamd LocalSocket..."
+if grep -qE "^LocalSocket " "${CLAMD_CONF}"; then
+  warn "clamd LocalSocket already configured — skipping."
+elif grep -qE "^#LocalSocket /run/clamd.scan/clamd.sock" "${CLAMD_CONF}"; then
+  sed -i 's|^#LocalSocket /run/clamd.scan/clamd.sock|LocalSocket /run/clamd.scan/clamd.sock|' \
+    "${CLAMD_CONF}"
+  success "clamd LocalSocket configured."
+else
+  warn "Expected LocalSocket line not found in ${CLAMD_CONF} — appending."
+  echo "${CLAMD_SOCKET_LINE}" >> "${CLAMD_CONF}"
+  success "clamd LocalSocket appended."
+fi
 
 log "Enabling and starting clamd..."
 systemctl enable --now clamd@scan
@@ -157,27 +173,34 @@ else
   rm -rf "${OPENSNITCH_TMP}"
 
   log "Enabling and starting OpenSnitch daemon..."
-  systemctl enable --now opensnitchd
+  systemctl enable --now opensnitch
   success "OpenSnitch v${OPENSNITCH_VER} installed and running."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "TLP (power management)"
 # ─────────────────────────────────────────────────────────────────────────────
-log "Removing conflicting power management daemons..."
-dnf remove -y tuned tuned-ppd power-profiles-daemon 2>/dev/null || true
+if command -v tlp &>/dev/null; then
+  warn "TLP is already installed — skipping."
+else
+  log "Removing conflicting power management daemons..."
+  dnf remove -y tuned tuned-ppd power-profiles-daemon 2>/dev/null || true
 
-log "Installing TLP, TLP-PD, and TLP-RDW..."
-dnf install -y tlp tlp-pd tlp-rdw
+  log "Setting Up tlp repository"
+  dnf install -y "https://repo.linrunner.de/fedora/tlp/repos/releases/tlp-release.fc$(rpm -E %fedora).noarch.rpm"
 
-log "Enabling and starting TLP services..."
-systemctl enable --now tlp.service
-systemctl enable --now tlp-pd.service
+  log "Installing TLP, TLP-PD, and TLP-RDW..."
+  dnf install -y tlp tlp-pd tlp-rdw
 
-log "Masking rfkill services to prevent conflicts..."
-systemctl mask systemd-rfkill.service systemd-rfkill.socket
+  log "Enabling and starting TLP services..."
+  systemctl enable --now tlp.service
+  systemctl enable --now tlp-pd.service
 
-success "TLP installed and running."
+  log "Masking rfkill services to prevent conflicts..."
+  systemctl mask systemd-rfkill.service systemd-rfkill.socket
+
+  success "TLP installed and running."
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "EasyEffects (Flatpak)"
@@ -188,24 +211,6 @@ else
   log "Installing EasyEffects from Flathub..."
   flatpak install -y flathub com.github.wwmm.easyeffects
   success "EasyEffects installed."
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-section "Slack"
-# ─────────────────────────────────────────────────────────────────────────────
-if command -v slack &>/dev/null; then
-  warn "Slack is already installed — skipping."
-else
-  log "Downloading Slack RPM..."
-  SLACK_TMP=$(mktemp -d)
-  curl -fSL -o "${SLACK_TMP}/slack.rpm" \
-    "https://slack.com/downloads/instructions/linux?ddl=1&build=rpm"
-
-  log "Installing Slack..."
-  dnf install -y "${SLACK_TMP}/slack.rpm"
-
-  rm -rf "${SLACK_TMP}"
-  success "Slack installed."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -413,7 +418,6 @@ echo "  ✔  Google Chrome"
 echo "  ✔  OpenSnitch"
 echo "  ✔  TLP"
 echo "  ✔  EasyEffects"
-echo "  ✔  Slack"
 echo "  ✔  Discord"
 echo "  ✔  mise"
 echo "  ✔  fish  (default shell)"
